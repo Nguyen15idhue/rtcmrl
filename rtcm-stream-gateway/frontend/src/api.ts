@@ -1,14 +1,23 @@
-const API_BASE = 'http://localhost:8080';
+const getApiBase = (): string => {
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    const port = window.location.port || 8080;
+    return `http://${hostname}:${port}`;
+  }
+  return 'http://localhost:8080';
+};
 
 export const api = {
+  getBaseUrl: () => getApiBase(),
+  
   async get<T>(path: string): Promise<T> {
-    const res = await fetch(API_BASE + path);
+    const res = await fetch(getApiBase() + path);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   },
 
   async post(path: string, body: unknown): Promise<unknown> {
-    const res = await fetch(API_BASE + path, {
+    const res = await fetch(getApiBase() + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -18,7 +27,7 @@ export const api = {
   },
 
   async delete(path: string): Promise<unknown> {
-    const res = await fetch(API_BASE + path, {
+    const res = await fetch(getApiBase() + path, {
       method: 'DELETE',
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -84,4 +93,36 @@ export interface Config {
   };
   runtime: Record<string, unknown>;
   auto_scale: boolean;
+  mode?: string;
+}
+
+export interface ModeInfo {
+  mode: string;
+  device: string;
+  port: number;
+  config: {
+    mode: string;
+    device: string;
+  };
+}
+
+export interface ModeResponse {
+  mode: string;
+  device: string;
+  message?: string;
+}
+
+export interface NetworkInfo {
+  hostname: string;
+  platform: string;
+  arch: string;
+  go_version: string;
+}
+
+export interface CaptureTestResult {
+  mode: string;
+  device: string;
+  port: number;
+  port_listening: boolean;
+  pcap_available: boolean;
 }

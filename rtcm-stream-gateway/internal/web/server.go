@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -32,16 +33,21 @@ type Server struct {
 	httpSrv    *http.Server
 	metricsSrv *http.Server
 	startTime  time.Time
+	mode       string
+	device     string
 }
 
 func New(cfgManager *config.Manager, eng *engine.Engine, pool *worker.Pool, webPort, metricsPort int) *Server {
 	r := chi.NewRouter()
+	cfg := cfgManager.Get()
 	s := &Server{
 		cfgManager: cfgManager,
 		eng:        eng,
 		workerPool: pool,
 		router:     r,
 		startTime:  time.Now(),
+		mode:       cfg.Mode,
+		device:     cfg.Capture.Device,
 	}
 
 	r.Use(middleware.Recoverer)
@@ -106,6 +112,12 @@ func (s *Server) setupRoutes(r *chi.Mux) {
 		api.Get("/generator", s.handleGeneratorGet)
 		api.Post("/generator/start", s.handleGeneratorStart)
 		api.Post("/generator/stop", s.handleGeneratorStop)
+
+		// Mode API
+		api.Get("/mode", s.handleGetMode)
+		api.Post("/mode", s.handleSetMode)
+		api.Get("/mode/test", s.handleTestCapture)
+		api.Get("/network", s.handleNetworkInfo)
 	})
 
 	if _, err := os.Stat(frontendRoot); err == nil {
@@ -536,4 +548,98 @@ func (s *Server) handleCleanupStations(w http.ResponseWriter, r *http.Request) {
 	count := s.eng.CleanupAllStations()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"cleanup": count})
+}
+
+func (s *Server) handleGetMode(w http.ResponseWriter, r *http.Request) {
+	cfg := s.cfgManager.Get()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"mode":   s.mode,
+		"device": s.device,
+		"port":   cfg.Capture.ListenPort,
+		"config": map[string]interface{}{
+			"mode":   cfg.Mode,
+			"device": cfg.Capture.Device,
+		},
+	})
+}
+
+func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode   string `json:"mode"`
+		Device string `json:"device"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.Mode != "tcp" && req.Mode != "pcap" && req.Mode != "auto" && req.Mode != "sniff" {
+		http.Error(w, "mode must be tcp, pcap, sniff, or auto", http.StatusBadRequest)
+		return
+	}
+
+	s.mode = req.Mode
+	s.device = req.Device
+
+	cfg := s.cfgManager.Get()
+	cfg.Mode = req.Mode
+	if req.Device != "" {
+		cfg.Capture.Device = req.Device
+	}
+	s.cfgManager.Update(cfg)
+	s.cfgManager.Save()
+
+	log.Printf("[MODE] mode changed to: %s, device: %s", req.Mode, req.Device)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"mode":    s.mode,
+		"device":  s.device,
+		"message": "Mode changed. Restart gateway to apply.",
+	})
+}
+
+func (s *Server) handleTestCapture(w http.ResponseWriter, r *http.Request) {
+	cfg := s.cfgManager.Get()
+	result := map[string]interface{}{
+		"mode":           s.mode,
+		"device":         s.device,
+		"port":           cfg.Capture.ListenPort,
+		"port_listening": false,
+		"pcap_available": false,
+	}
+
+	if addr := fmt.Sprintf(":%d", cfg.Capture.ListenPort); addr != ":" {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			ln.Close()
+			result["port_listening"] = false
+		} else {
+			result["port_listening"] = true
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) handleNetworkInfo(w http.ResponseWriter, r *http.Request) {
+	info := map[string]interface{}{
+		"hostname":   getHostname(),
+		"platform":   runtime.GOOS,
+		"arch":       runtime.GOARCH,
+		"go_version": runtime.Version(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(info)
+}
+
+func getHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return hostname
 }
