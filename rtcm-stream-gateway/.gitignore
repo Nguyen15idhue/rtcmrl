@@ -6,4 +6,4 @@ bin/
 !package.json
 rtcm-stream-gateway\frontend\node_modules
 node_modules/
-dist/
+frontend/node_modules/

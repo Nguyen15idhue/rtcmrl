@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/your-org/rtcm-stream-gateway/internal/config"
 	"github.com/your-org/rtcm-stream-gateway/internal/engine"
+	"github.com/your-org/rtcm-stream-gateway/internal/generator"
 	"github.com/your-org/rtcm-stream-gateway/internal/worker"
 )
 
@@ -26,6 +27,7 @@ type Server struct {
 	cfgManager *config.Manager
 	eng        *engine.Engine
 	workerPool *worker.Pool
+	gen        *generator.Generator
 	router     *chi.Mux
 	httpSrv    *http.Server
 	metricsSrv *http.Server
@@ -89,6 +91,8 @@ func (s *Server) setupRoutes(r *chi.Mux) {
 		api.Get("/health", s.handleHealth)
 		api.Get("/stations", s.handleStations)
 		api.Get("/stations/{id}", s.handleStationByID)
+		api.Get("/stations/quality", s.handleAllStationQuality)
+		api.Get("/stations/{id}/quality", s.handleStationQuality)
 		api.Get("/stats", s.handleStats)
 		api.Get("/config", s.handleGetConfig)
 		api.Post("/config", s.handleUpdateConfig)
@@ -96,6 +100,11 @@ func (s *Server) setupRoutes(r *chi.Mux) {
 		api.Post("/workers", s.handleSetWorkers)
 		api.Post("/workers/auto-scale", s.handleSetAutoScale)
 		api.Post("/restart", s.handleRestart)
+
+		// Generator API
+		api.Get("/generator", s.handleGeneratorGet)
+		api.Post("/generator/start", s.handleGeneratorStart)
+		api.Post("/generator/stop", s.handleGeneratorStop)
 	})
 
 	if _, err := os.Stat(frontendRoot); err == nil {
@@ -420,4 +429,102 @@ func (s *Server) shutdown() {
 	if err := s.metricsSrv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("[MET] metrics shutdown error: %v", err)
 	}
+}
+
+func (s *Server) handleStationQuality(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid station id", http.StatusBadRequest)
+		return
+	}
+
+	quality := s.eng.GetStationQuality(id)
+	if quality == nil {
+		http.Error(w, "station not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(quality)
+}
+
+func (s *Server) handleAllStationQuality(w http.ResponseWriter, r *http.Request) {
+	qualities := s.eng.GetAllStationQuality()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(qualities)
+}
+
+func (s *Server) handleGeneratorGet(w http.ResponseWriter, r *http.Request) {
+	if s.gen == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"running": false,
+			"config":  nil,
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"running": s.gen.IsRunning(),
+		"config":  s.gen.GetConfig(),
+	})
+}
+
+func (s *Server) handleGeneratorStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Host       string `json:"host"`
+		Stations   []int  `json:"stations"`
+		IntervalMs int    `json:"interval_ms"`
+		FrameType  uint16 `json:"frame_type"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.IntervalMs <= 0 {
+		req.IntervalMs = 1000
+	}
+	if req.FrameType == 0 {
+		req.FrameType = 1006
+	}
+
+	cfg := generator.Config{
+		Host:       req.Host,
+		Port:       12101,
+		StationIDs: req.Stations,
+		IntervalMs: req.IntervalMs,
+		FrameType:  req.FrameType,
+	}
+
+	if s.gen == nil {
+		s.gen = generator.New(cfg)
+	} else {
+		s.gen.SetConfig(cfg)
+	}
+
+	if err := s.gen.Start(); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"running": true,
+		"config":  s.gen.GetConfig(),
+	})
+}
+
+func (s *Server) handleGeneratorStop(w http.ResponseWriter, r *http.Request) {
+	if s.gen != nil {
+		s.gen.Stop()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"running": false,
+	})
 }

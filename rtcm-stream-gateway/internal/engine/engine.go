@@ -49,14 +49,19 @@ type sourceState struct {
 }
 
 type stationState struct {
-	ID         int
-	VariantKey string
-	Mount      string
-	LastSeen   time.Time
-	FramesOut  uint64
-	BytesOut   uint64
-	Client     *caster.Client
-	Enabled    bool
+	ID            int
+	VariantKey    string
+	Mount         string
+	LastSeen      time.Time
+	FirstSeen     time.Time
+	FramesIn      uint64
+	FramesOut     uint64
+	FramesDropped uint64
+	BytesIn       uint64
+	BytesOut      uint64
+	Client        *caster.Client
+	Enabled       bool
+	LatencyMs     float64
 }
 
 type stationRoot struct {
@@ -169,7 +174,10 @@ func (e *Engine) onFrame(f InFrame) {
 		e.mu.Unlock()
 	}
 
-	st, sendOK := e.routeForSource(f.SourceKey, stationID, f.At)
+	now := time.Now()
+	latencyMs := float64(now.Sub(f.At).Milliseconds())
+
+	st, sendOK := e.routeForSource(f.SourceKey, stationID, now)
 	if !sendOK {
 		e.mu.Lock()
 		e.ambiguous++
@@ -182,15 +190,24 @@ func (e *Engine) onFrame(f InFrame) {
 		return
 	}
 
+	e.mu.Lock()
+	st.FramesIn++
+	st.BytesIn += uint64(len(f.Frame))
+	st.LatencyMs = (st.LatencyMs*float64(st.FramesIn-1) + latencyMs) / float64(st.FramesIn)
+	e.mu.Unlock()
+
 	if !e.testMode && st.Client != nil {
 		if err := st.Client.Send(f.Frame); err != nil {
 			log.Printf("[WARN] station=%d mount=%s send failed: %v", st.ID, st.Mount, err)
+			e.mu.Lock()
+			st.FramesDropped++
+			e.mu.Unlock()
 			return
 		}
 	}
 
 	e.mu.Lock()
-	st.LastSeen = f.At
+	st.LastSeen = now
 	st.FramesOut++
 	st.BytesOut += uint64(len(f.Frame))
 	e.forwarded++
@@ -242,6 +259,7 @@ func (e *Engine) routeForSource(sourceKey string, stationID int, now time.Time) 
 		Mount:      mount,
 		Client:     client,
 		LastSeen:   now,
+		FirstSeen:  now,
 		Enabled:    true,
 	}
 
@@ -442,4 +460,105 @@ func (e *Engine) SetStationEnabled(stationID int, variantKey string, enabled boo
 	}
 	st.Enabled = enabled
 	return true
+}
+
+type StationQuality struct {
+	StationID     int       `json:"station_id"`
+	Mount         string    `json:"mount"`
+	FramesIn      uint64    `json:"frames_in"`
+	FramesOut     uint64    `json:"frames_out"`
+	FramesDropped uint64    `json:"frames_dropped"`
+	BytesIn       uint64    `json:"bytes_in"`
+	BytesOut      uint64    `json:"bytes_out"`
+	PacketLoss    float64   `json:"packet_loss_percent"`
+	AvgLatencyMs  float64   `json:"avg_latency_ms"`
+	LastSeen      time.Time `json:"last_seen"`
+	UptimeSec     int64     `json:"uptime_sec"`
+	FirstSeen     time.Time `json:"first_seen"`
+}
+
+func (e *Engine) GetStationQuality(stationID int) *StationQuality {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	root := e.stations[stationID]
+	if root == nil {
+		return nil
+	}
+
+	var quality StationQuality
+	quality.StationID = stationID
+	quality.FirstSeen = time.Now()
+
+	for vk, st := range root.Variants {
+		quality.Mount = st.Mount
+		quality.FramesIn += st.FramesIn
+		quality.FramesOut += st.FramesOut
+		quality.FramesDropped += st.FramesDropped
+		quality.BytesIn += st.BytesIn
+		quality.BytesOut += st.BytesOut
+		if st.LatencyMs > 0 {
+			quality.AvgLatencyMs = st.LatencyMs
+		}
+		if st.LastSeen.After(quality.LastSeen) {
+			quality.LastSeen = st.LastSeen
+		}
+		_ = vk
+	}
+
+	if quality.FramesIn > 0 {
+		quality.PacketLoss = float64(quality.FramesDropped) / float64(quality.FramesIn+quality.FramesDropped) * 100
+	}
+
+	if !quality.FirstSeen.IsZero() {
+		quality.UptimeSec = int64(time.Since(quality.FirstSeen).Seconds())
+	}
+
+	return &quality
+}
+
+func (e *Engine) GetAllStationQuality() []*StationQuality {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	qualities := make([]*StationQuality, 0, len(e.stations))
+	for stationID := range e.stations {
+		root := e.stations[stationID]
+		if root == nil {
+			continue
+		}
+
+		var quality StationQuality
+		quality.StationID = stationID
+		quality.FirstSeen = time.Now()
+
+		for _, st := range root.Variants {
+			quality.Mount = st.Mount
+			quality.FramesIn += st.FramesIn
+			quality.FramesOut += st.FramesOut
+			quality.FramesDropped += st.FramesDropped
+			quality.BytesIn += st.BytesIn
+			quality.BytesOut += st.BytesOut
+			if st.LatencyMs > 0 {
+				quality.AvgLatencyMs = st.LatencyMs
+			}
+			if st.FirstSeen.Before(quality.FirstSeen) {
+				quality.FirstSeen = st.FirstSeen
+			}
+			if st.LastSeen.After(quality.LastSeen) {
+				quality.LastSeen = st.LastSeen
+			}
+		}
+
+		if quality.FramesIn > 0 {
+			quality.PacketLoss = float64(quality.FramesDropped) / float64(quality.FramesIn+quality.FramesDropped) * 100
+		}
+
+		if !quality.FirstSeen.IsZero() {
+			quality.UptimeSec = int64(time.Since(quality.FirstSeen).Seconds())
+		}
+
+		qualities = append(qualities, &quality)
+	}
+	return qualities
 }
