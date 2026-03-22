@@ -104,29 +104,40 @@ func main() {
 	log.Printf("[BOOT] web: :%d metrics: :%d", cfg.Web.Port, cfg.Web.MetricsPort)
 	log.Printf("[BOOT] workers: min=%d max=%d auto_scale=%v", cfg.Worker.Min, cfg.Worker.Max, cfg.Worker.AutoScale)
 
-	if mode == "tcp" {
-		log.Printf("[BOOT] capture: TCP mode on port %d (no libpcap)", cfg.Capture.ListenPort)
-		tcpCfg := capture.TCPConfig{
+	handler := func(sourceKey, sourceIP string, frame []byte, at time.Time) {
+		pool.Input(engine.InFrame{SourceKey: sourceKey, SourceIP: sourceIP, Frame: frame, At: at})
+	}
+
+	if mode == "auto" {
+		mode = capture.DetectBestMode(cfg.Capture.Device, cfg.Capture.ListenPort)
+	}
+
+	if mode == "pcap" || mode == "sniff" {
+		log.Printf("[BOOT] capture: PCAP mode on port %d (sniffing, no port bind)", cfg.Capture.ListenPort)
+		pcapCfg := capture.PcapConfig{
+			Interface:  cfg.Capture.Device,
 			ListenPort: cfg.Capture.ListenPort,
 			QueueSize:  cfg.Worker.QueueSize,
+			SnapLen:    cfg.Capture.SnapLen,
+			Promisc:    true,
+			Timeout:    100 * time.Millisecond,
 		}
-		handler := func(sourceKey, sourceIP string, frame []byte, at time.Time) {
-			pool.Input(engine.InFrame{SourceKey: sourceKey, SourceIP: sourceIP, Frame: frame, At: at})
-		}
-		listener := capture.NewTCPListener(tcpCfg, handler)
-		listener.Run(ctx)
-	} else {
-		log.Printf("[BOOT] capture: pcap device=%s port=%d", cfg.Capture.Device, cfg.Capture.ListenPort)
-		capCfg := capture.Config{
-			Device:     cfg.Capture.Device,
-			ListenPort: cfg.Capture.ListenPort,
-			SnapLen:    int32(cfg.Capture.SnapLen),
-			BufferMB:   cfg.Capture.BufferMB,
-		}
-		if err := capture.Run(ctx, capCfg, eng); err != nil {
-			log.Fatalf("[BOOT] capture failed: %v", err)
+		pcapCap := capture.NewPcapCapture(pcapCfg, handler)
+		if err := pcapCap.Run(ctx); err != nil {
+			log.Printf("[BOOT] PCAP failed: %v, falling back to TCP mode", err)
+			mode = "tcp"
+		} else {
+			return
 		}
 	}
+
+	log.Printf("[BOOT] capture: TCP mode on port %d", cfg.Capture.ListenPort)
+	tcpCfg := capture.TCPConfig{
+		ListenPort: cfg.Capture.ListenPort,
+		QueueSize:  cfg.Worker.QueueSize,
+	}
+	listener := capture.NewTCPListener(tcpCfg, handler)
+	listener.Run(ctx)
 
 	log.Printf("[STOP] done")
 }
