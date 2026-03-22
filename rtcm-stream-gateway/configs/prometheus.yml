@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers: []
+
+rule_files: []
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "rtcm-gateway"
+    static_configs:
+      - targets: ["rtcm-gateway:6060"]
+    metrics_path: /metrics
+    scrape_interval: 5s

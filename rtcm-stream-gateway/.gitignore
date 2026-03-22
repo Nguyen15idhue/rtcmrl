@@ -1,3 +1,5 @@
 bin/
 *.log
 .env
+rtcm-stream-gateway\frontend\node_modules
+node_modules

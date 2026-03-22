@@ -2,86 +2,119 @@ package main
 
 import (
 	"context"
-	"flag"
 	"log"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/your-org/rtcm-stream-gateway/internal/capture"
+	"github.com/your-org/rtcm-stream-gateway/internal/config"
 	"github.com/your-org/rtcm-stream-gateway/internal/engine"
+	"github.com/your-org/rtcm-stream-gateway/internal/web"
+	"github.com/your-org/rtcm-stream-gateway/internal/worker"
 )
 
 func main() {
-	device := flag.String("device", env("DEVICE", "any"), "capture interface")
-	listenPort := flag.Int("listen-port", envInt("LISTEN_PORT", 12101), "incoming TCP port")
-	snaplen := flag.Int("snaplen", envInt("SNAPLEN", 262144), "pcap snaplen")
-	bufferMB := flag.Int("buffer-mb", envInt("BUFFER_MB", 64), "pcap kernel buffer MB")
+	cfgManager := config.New()
 
-	casterHost := flag.String("caster-host", env("CASTER_HOST", ""), "caster destination host")
-	casterPort := flag.Int("caster-port", envInt("CASTER_PORT", 2101), "caster destination port")
-	casterPass := flag.String("caster-pass", env("CASTER_PASS", ""), "caster SOURCE password")
-	mountPrefix := flag.String("mount-prefix", env("MOUNT_PREFIX", "STN"), "mountpoint prefix, final mount is PREFIX_XXXX")
-
-	sourceIdleSec := flag.Int("source-idle-sec", envInt("SOURCE_IDLE_SEC", 20), "remove idle source mapping after N seconds")
-	stationIdleSec := flag.Int("station-idle-sec", envInt("STATION_IDLE_SEC", 180), "close idle station output after N seconds")
-	statsSec := flag.Int("stats-sec", envInt("STATS_SEC", 5), "stats interval seconds")
-
-	flag.Parse()
-
-	if *casterHost == "" || *casterPass == "" {
-		log.Fatal("missing required output params: -caster-host, -caster-pass")
+	// Set config file path
+	if fp := os.Getenv("CONFIG_FILE"); fp != "" {
+		cfgManager.SetFilePath(fp)
+		log.Printf("[BOOT] config file: %s", fp)
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	cfg := cfgManager.Get()
+
+	mode := os.Getenv("CAPTURE_MODE")
+	if mode == "" {
+		mode = os.Getenv("MODE")
+	}
+
+	testMode := cfg.Caster.Host == "test" || os.Getenv("TEST_MODE") == "1"
+
+	if !testMode && (cfg.Caster.Host == "" || cfg.Caster.Pass == "") {
+		log.Fatal("missing required: CASTER_HOST and CASTER_PASS must be set")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Printf("[BOOT] shutdown signal received")
+		cancel()
+	}()
 
 	eng := engine.New(engine.Config{
 		Caster: engine.CasterConfig{
-			Host:        *casterHost,
-			Port:        *casterPort,
-			Pass:        *casterPass,
-			MountPrefix: *mountPrefix,
+			Host:         cfg.Caster.Host,
+			Port:         cfg.Caster.Port,
+			Pass:         cfg.Caster.Pass,
+			MountPrefix:  cfg.Caster.MountPrefix,
+			NtripVersion: cfg.Caster.NtripVersion,
+			User:         cfg.Caster.User,
 		},
-		SourceIdle:    time.Duration(*sourceIdleSec) * time.Second,
-		StationIdle:   time.Duration(*stationIdleSec) * time.Second,
-		StatsInterval: time.Duration(*statsSec) * time.Second,
-		QueueSize:     16384,
+		SourceIdle:    cfg.Runtime.SourceIdle,
+		StationIdle:   cfg.Runtime.StationIdle,
+		StatsInterval: cfg.Runtime.StatsInterval,
+		QueueSize:     cfg.Worker.QueueSize,
+		TestMode:      testMode,
 	})
+
+	pool := worker.NewPool(ctx, worker.PoolConfig{
+		Min:             cfg.Worker.Min,
+		Max:             cfg.Worker.Max,
+		QueueSize:       cfg.Worker.QueueSize,
+		AutoScale:       cfg.Worker.AutoScale,
+		ScaleUpThresh:   cfg.Worker.ScaleUpThresh,
+		ScaleDownThresh: cfg.Worker.ScaleDownThresh,
+		ScaleInterval:   cfg.Worker.ScaleInterval,
+	}, eng)
 
 	go eng.Run(ctx)
 
-	cfg := capture.Config{
-		Device:     *device,
-		ListenPort: *listenPort,
-		SnapLen:    int32(*snaplen),
-		BufferMB:   *bufferMB,
+	go pool.Start(ctx)
+
+	go func() {
+		<-ctx.Done()
+		pool.Stop()
+	}()
+
+	srv := web.New(cfgManager, eng, pool, cfg.Web.Port, cfg.Web.MetricsPort)
+	go srv.Start(ctx)
+
+	log.Printf("[BOOT] rtcm-stream-gateway v2.0.0 starting")
+	log.Printf("[BOOT] mode: %s", mode)
+	log.Printf("[BOOT] caster: %s:%d prefix=%s", cfg.Caster.Host, cfg.Caster.Port, cfg.Caster.MountPrefix)
+	log.Printf("[BOOT] web: :%d metrics: :%d", cfg.Web.Port, cfg.Web.MetricsPort)
+	log.Printf("[BOOT] workers: min=%d max=%d auto_scale=%v", cfg.Worker.Min, cfg.Worker.Max, cfg.Worker.AutoScale)
+
+	if mode == "tcp" {
+		log.Printf("[BOOT] capture: TCP mode on port %d (no libpcap)", cfg.Capture.ListenPort)
+		tcpCfg := capture.TCPConfig{
+			ListenPort: cfg.Capture.ListenPort,
+			QueueSize:  cfg.Worker.QueueSize,
+		}
+		handler := func(sourceKey, sourceIP string, frame []byte, at time.Time) {
+			pool.Input(engine.InFrame{SourceKey: sourceKey, SourceIP: sourceIP, Frame: frame, At: at})
+		}
+		listener := capture.NewTCPListener(tcpCfg, handler)
+		listener.Run(ctx)
+	} else {
+		log.Printf("[BOOT] capture: pcap device=%s port=%d", cfg.Capture.Device, cfg.Capture.ListenPort)
+		capCfg := capture.Config{
+			Device:     cfg.Capture.Device,
+			ListenPort: cfg.Capture.ListenPort,
+			SnapLen:    int32(cfg.Capture.SnapLen),
+			BufferMB:   cfg.Capture.BufferMB,
+		}
+		if err := capture.Run(ctx, capCfg, eng); err != nil {
+			log.Fatalf("[BOOT] capture failed: %v", err)
+		}
 	}
 
-	log.Printf("[BOOT] device=%s port=%d out=%s:%d prefix=%s", *device, *listenPort, *casterHost, *casterPort, *mountPrefix)
-	if err := capture.Run(ctx, cfg, eng); err != nil {
-		log.Fatalf("capture failed: %v", err)
-	}
 	log.Printf("[STOP] done")
-}
-
-func env(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
-func envInt(k string, def int) int {
-	v := os.Getenv(k)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
-	return n
 }

@@ -1,0 +1,33 @@
+# Build
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go-build-*
+dist/
+
+# Dependencies
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Config persistence
+configs/data/
+
+# React build
+frontend/dist/
+frontend/node_modules/

@@ -1,0 +1,86 @@
+version: "3.9"
+
+services:
+  rtcm-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: rtcm-gateway
+    image: rtcm-stream-gateway:latest
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    network_mode: host
+    environment:
+      - DEVICE=${DEVICE:-any}
+      - LISTEN_PORT=${LISTEN_PORT:-12101}
+      - CASTER_HOST=${CASTER_HOST}
+      - CASTER_PORT=${CASTER_PORT:-2101}
+      - CASTER_PASS=${CASTER_PASS}
+      - MOUNT_PREFIX=${MOUNT_PREFIX:-STN}
+      - WEB_PORT=${WEB_PORT:-8080}
+      - METRICS_PORT=${METRICS_PORT:-6060}
+      - WORKER_MIN=${WORKER_MIN:-4}
+      - WORKER_MAX=${WORKER_MAX:-16}
+      - AUTO_SCALE=${AUTO_SCALE:-true}
+      - CONFIG_FILE=/app/configs/gateway.json
+    volumes:
+      - ./configs:/app/configs:rw
+      - ./logs:/app/logs:rw
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  prometheus:
+    image: docker.io/prom/prometheus:v2.50.0
+    container_name: rtcm-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - rtcm-gateway
+    networks:
+      - monitoring
+
+  grafana:
+    image: docker.io/grafana/grafana:10.3.3
+    container_name: rtcm-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./configs/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./configs/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  monitoring:
+    driver: bridge

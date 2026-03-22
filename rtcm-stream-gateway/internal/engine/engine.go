@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/your-org/rtcm-stream-gateway/internal/caster"
+	"github.com/your-org/rtcm-stream-gateway/internal/metrics"
 	"github.com/your-org/rtcm-stream-gateway/internal/rtcm"
 )
 
@@ -19,10 +20,12 @@ type InFrame struct {
 }
 
 type CasterConfig struct {
-	Host        string
-	Port        int
-	Pass        string
-	MountPrefix string
+	Host         string
+	Port         int
+	Pass         string
+	MountPrefix  string
+	NtripVersion int
+	User         string
 }
 
 type Config struct {
@@ -31,6 +34,7 @@ type Config struct {
 	StationIdle   time.Duration
 	StatsInterval time.Duration
 	QueueSize     int
+	TestMode      bool
 }
 
 type sourceState struct {
@@ -52,6 +56,7 @@ type stationState struct {
 	FramesOut  uint64
 	BytesOut   uint64
 	Client     *caster.Client
+	Enabled    bool
 }
 
 type stationRoot struct {
@@ -63,8 +68,9 @@ type stationRoot struct {
 type Engine struct {
 	cfg Config
 
-	inCh chan InFrame
-	mu   sync.RWMutex
+	inCh     chan InFrame
+	mu       sync.RWMutex
+	testMode bool
 
 	sources  map[string]*sourceState
 	stations map[int]*stationRoot
@@ -97,6 +103,7 @@ func New(cfg Config) *Engine {
 		inCh:     make(chan InFrame, cfg.QueueSize),
 		sources:  make(map[string]*sourceState),
 		stations: make(map[int]*stationRoot),
+		testMode: cfg.TestMode,
 	}
 }
 
@@ -107,6 +114,7 @@ func (e *Engine) Input(f InFrame) {
 		e.mu.Lock()
 		e.drops++
 		e.mu.Unlock()
+		metrics.FramesDropped.Inc()
 	}
 }
 
@@ -126,6 +134,7 @@ func (e *Engine) Run(ctx context.Context) {
 			e.gcSources(now)
 			e.gcStations(now)
 			e.printStats()
+			metrics.ActiveStations.Set(float64(e.stationCount()))
 		}
 	}
 }
@@ -147,6 +156,7 @@ func (e *Engine) onFrame(f InFrame) {
 		e.mu.Lock()
 		e.unknown++
 		e.mu.Unlock()
+		metrics.FramesUnknown.Inc()
 		return
 	}
 
@@ -161,12 +171,22 @@ func (e *Engine) onFrame(f InFrame) {
 
 	st, sendOK := e.routeForSource(f.SourceKey, stationID, f.At)
 	if !sendOK {
+		e.mu.Lock()
+		e.ambiguous++
+		e.mu.Unlock()
+		metrics.FramesAmbiguous.Inc()
 		return
 	}
 
-	if err := st.Client.Send(f.Frame); err != nil {
-		log.Printf("[WARN] station=%d mount=%s send failed: %v", st.ID, st.Mount, err)
+	if !st.Enabled {
 		return
+	}
+
+	if !e.testMode && st.Client != nil {
+		if err := st.Client.Send(f.Frame); err != nil {
+			log.Printf("[WARN] station=%d mount=%s send failed: %v", st.ID, st.Mount, err)
+			return
+		}
 	}
 
 	e.mu.Lock()
@@ -175,6 +195,9 @@ func (e *Engine) onFrame(f InFrame) {
 	st.BytesOut += uint64(len(f.Frame))
 	e.forwarded++
 	e.mu.Unlock()
+
+	metrics.FramesForwarded.Inc()
+	metrics.BytesForwarded.Add(float64(len(f.Frame)))
 }
 
 func (e *Engine) routeForSource(sourceKey string, stationID int, now time.Time) (*stationState, bool) {
@@ -194,20 +217,7 @@ func (e *Engine) routeForSource(sourceKey string, stationID int, now time.Time) 
 		e.stations[stationID] = root
 	}
 
-	variantKey := s.Fingerprint
-	if variantKey == "" {
-		if s.VariantKey != "" {
-			variantKey = s.VariantKey
-		} else if len(root.Variants) == 1 {
-			for k := range root.Variants {
-				variantKey = k
-				break
-			}
-		} else {
-			e.ambiguous++
-			return nil, false
-		}
-	}
+	variantKey := sourceKey
 
 	s.VariantKey = variantKey
 
@@ -216,13 +226,25 @@ func (e *Engine) routeForSource(sourceKey string, stationID int, now time.Time) 
 	}
 
 	mount := e.mountForVariant(root, variantKey)
+
+	var client *caster.Client
+	if !e.testMode {
+		if e.cfg.Caster.NtripVersion == 2 && e.cfg.Caster.User != "" {
+			client = caster.NewWithAuth(e.cfg.Caster.Host, e.cfg.Caster.Port, e.cfg.Caster.User, e.cfg.Caster.Pass, mount, e.cfg.Caster.NtripVersion)
+		} else {
+			client = caster.New(e.cfg.Caster.Host, e.cfg.Caster.Port, e.cfg.Caster.Pass, mount)
+		}
+	}
+
 	st := &stationState{
 		ID:         stationID,
 		VariantKey: variantKey,
 		Mount:      mount,
+		Client:     client,
 		LastSeen:   now,
-		Client:     caster.New(e.cfg.Caster.Host, e.cfg.Caster.Port, e.cfg.Caster.Pass, mount),
+		Enabled:    true,
 	}
+
 	root.Variants[variantKey] = st
 	if root.PrimaryKey == "" {
 		root.PrimaryKey = variantKey
@@ -232,14 +254,7 @@ func (e *Engine) routeForSource(sourceKey string, stationID int, now time.Time) 
 }
 
 func (e *Engine) mountForVariant(root *stationRoot, variantKey string) string {
-	base := fmt.Sprintf("%s_%04d", e.cfg.Caster.MountPrefix, root.ID)
-	if len(root.Variants) == 0 {
-		return base
-	}
-	if root.PrimaryKey == variantKey {
-		return base
-	}
-	return fmt.Sprintf("%s_%s", base, short(variantKey))
+	return fmt.Sprintf("%s_%04d", e.cfg.Caster.MountPrefix, root.ID)
 }
 
 func short(s string) string {
@@ -267,7 +282,9 @@ func (e *Engine) gcStations(now time.Time) {
 	for stationID, root := range e.stations {
 		for vk, st := range root.Variants {
 			if now.Sub(st.LastSeen) > e.cfg.StationIdle {
-				_ = st.Client.Close()
+				if !e.testMode && st.Client != nil {
+					_ = st.Client.Close()
+				}
 				delete(root.Variants, vk)
 				if root.PrimaryKey == vk {
 					root.PrimaryKey = ""
@@ -283,9 +300,14 @@ func (e *Engine) gcStations(now time.Time) {
 func (e *Engine) closeAllStations() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.testMode {
+		return
+	}
 	for _, root := range e.stations {
 		for _, st := range root.Variants {
-			_ = st.Client.Close()
+			if st.Client != nil {
+				_ = st.Client.Close()
+			}
 		}
 	}
 }
@@ -303,4 +325,121 @@ func (e *Engine) printStats() {
 				sid, st.Mount, short(st.VariantKey), st.FramesOut, st.BytesOut, st.LastSeen.Format(time.RFC3339))
 		}
 	}
+}
+
+func (e *Engine) stationCount() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.stations)
+}
+
+func (e *Engine) GetStations() []map[string]interface{} {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	result := make([]map[string]interface{}, 0, len(e.stations))
+	for sid, root := range e.stations {
+		for vk, st := range root.Variants {
+			result = append(result, map[string]interface{}{
+				"station_id":  sid,
+				"variant_key": vk,
+				"mount":       st.Mount,
+				"enabled":     st.Enabled,
+				"last_seen":   st.LastSeen.Format(time.RFC3339),
+				"frames_out":  st.FramesOut,
+				"bytes_out":   st.BytesOut,
+				"source_ip":   e.sourceIPForStation(sid, vk),
+			})
+		}
+	}
+	return result
+}
+
+func (e *Engine) sourceIPForStation(stationID int, variantKey string) string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, s := range e.sources {
+		if s.StationID == stationID && s.VariantKey == variantKey {
+			return s.SourceIP
+		}
+	}
+	return ""
+}
+
+func (e *Engine) GetStationByID(id int) map[string]interface{} {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	root := e.stations[id]
+	if root == nil {
+		return nil
+	}
+
+	variants := make([]map[string]interface{}, 0, len(root.Variants))
+	for vk, st := range root.Variants {
+		variants = append(variants, map[string]interface{}{
+			"variant_key": vk,
+			"mount":       st.Mount,
+			"enabled":     st.Enabled,
+			"last_seen":   st.LastSeen.Format(time.RFC3339),
+			"frames_out":  st.FramesOut,
+			"bytes_out":   st.BytesOut,
+		})
+	}
+	return map[string]interface{}{
+		"station_id": id,
+		"variants":   variants,
+	}
+}
+
+func (e *Engine) GetStats() map[string]interface{} {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return map[string]interface{}{
+		"sources":   len(e.sources),
+		"stations":  len(e.stations),
+		"forwarded": e.forwarded,
+		"unknown":   e.unknown,
+		"ambiguous": e.ambiguous,
+		"drops":     e.drops,
+	}
+}
+
+func (e *Engine) UpdateRuntimeConfig(cfg struct {
+	SourceIdle    time.Duration
+	StationIdle   time.Duration
+	StatsInterval time.Duration
+}) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg.SourceIdle = cfg.SourceIdle
+	e.cfg.StationIdle = cfg.StationIdle
+	e.cfg.StatsInterval = cfg.StatsInterval
+}
+
+func (e *Engine) EnableStation(stationID int, enabled bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	root := e.stations[stationID]
+	if root == nil {
+		return false
+	}
+	for _, st := range root.Variants {
+		st.Enabled = enabled
+	}
+	return true
+}
+
+func (e *Engine) SetStationEnabled(stationID int, variantKey string, enabled bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	root := e.stations[stationID]
+	if root == nil {
+		return false
+	}
+	st := root.Variants[variantKey]
+	if st == nil {
+		return false
+	}
+	st.Enabled = enabled
+	return true
 }

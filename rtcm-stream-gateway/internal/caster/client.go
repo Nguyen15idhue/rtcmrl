@@ -1,22 +1,26 @@
 package caster
 
 import (
+	"encoding/base64"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
 )
 
 type Client struct {
-	host      string
-	port      int
-	pass      string
-	mount     string
-	dialTO    time.Duration
-	writeTO   time.Duration
-	mu        sync.Mutex
-	conn      net.Conn
-	connected bool
+	host         string
+	port         int
+	pass         string
+	user         string
+	mount        string
+	ntripVersion int
+	dialTO       time.Duration
+	writeTO      time.Duration
+	mu           sync.Mutex
+	conn         net.Conn
+	connected    bool
 }
 
 func New(host string, port int, pass, mount string) *Client {
@@ -27,6 +31,19 @@ func New(host string, port int, pass, mount string) *Client {
 		mount:   mount,
 		dialTO:  8 * time.Second,
 		writeTO: 8 * time.Second,
+	}
+}
+
+func NewWithAuth(host string, port int, user, pass, mount string, ntripVersion int) *Client {
+	return &Client{
+		host:         host,
+		port:         port,
+		user:         user,
+		pass:         pass,
+		mount:        mount,
+		ntripVersion: ntripVersion,
+		dialTO:       8 * time.Second,
+		writeTO:      8 * time.Second,
 	}
 }
 
@@ -80,11 +97,37 @@ func (c *Client) ensureConnected() error {
 	if len(mount) > 0 && mount[0] != '/' {
 		mount = "/" + mount
 	}
-	head := fmt.Sprintf("SOURCE %s %s\r\nSource-Agent: go-gateway\r\n\r\n", c.pass, mount)
+
+	var head string
+	if c.ntripVersion == 2 && c.user != "" {
+		// NTRIP v2 with basic auth
+		auth := base64.StdEncoding.EncodeToString([]byte(c.user + ":" + c.pass))
+		head = fmt.Sprintf("GET /%s HTTP/1.1\r\n", mount[1:])
+		head += fmt.Sprintf("Authorization: Basic %s\r\n", auth)
+		head += "Ntrip-Version: Ntrip/2.0\r\n"
+		head += "User-Agent: go-gateway/1.0\r\n"
+		head += "\r\n"
+	} else {
+		// NTRIP v1
+		head = fmt.Sprintf("SOURCE %s %s\r\nSource-Agent: go-gateway\r\n\r\n", c.pass, mount)
+		log.Printf("[NTRIP] connecting to %s:%d mount=%s ntrip_version=%d", c.host, c.port, mount, c.ntripVersion)
+	}
+
 	if _, err := conn.Write([]byte(head)); err != nil {
+		log.Printf("[NTRIP] write failed: %v", err)
 		_ = conn.Close()
 		return err
 	}
+
+	buf := make([]byte, 256)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn.Read(buf)
+	if err != nil {
+		log.Printf("[NTRIP] response read error: %v", err)
+		_ = conn.Close()
+		return err
+	}
+	log.Printf("[NTRIP] caster response: %s", string(buf[:n]))
 
 	c.conn = conn
 	c.connected = true
