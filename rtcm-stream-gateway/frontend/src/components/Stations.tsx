@@ -105,6 +105,16 @@ export default function Stations() {
     }
   }
 
+  const handleCleanup = async () => {
+    if (!confirm('Clear all stations and NTRIP connections?')) return
+    try {
+      await api.delete('/api/v1/stations')
+      load()
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
   const getQualityForStation = (stationId: number): StationQuality | undefined => {
     return quality.find(q => q.station_id === stationId)
   }
@@ -115,7 +125,10 @@ export default function Stations() {
     <div>
       <div className="flex justify-between items-center mb-4">
         <h2>Stations ({data.total} active)</h2>
-        <button className="btn" onClick={load}>Refresh</button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button className="btn" onClick={handleCleanup} style={{ background: 'var(--red)', color: 'white' }}>Clear All</button>
+          <button className="btn" onClick={load}>Refresh</button>
+        </div>
       </div>
 
       {/* Generator Controls */}

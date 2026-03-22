@@ -562,3 +562,26 @@ func (e *Engine) GetAllStationQuality() []*StationQuality {
 	}
 	return qualities
 }
+
+func (e *Engine) CleanupAllStations() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	count := 0
+	for stationID, root := range e.stations {
+		for _, st := range root.Variants {
+			if !e.testMode && st.Client != nil {
+				st.Client.Close()
+			}
+			count++
+		}
+		delete(e.stations, stationID)
+	}
+
+	for key := range e.sources {
+		delete(e.sources, key)
+	}
+
+	log.Printf("[CLEAN] removed %d stations and connections", count)
+	return count
+}

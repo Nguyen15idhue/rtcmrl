@@ -93,6 +93,7 @@ func (s *Server) setupRoutes(r *chi.Mux) {
 		api.Get("/stations/{id}", s.handleStationByID)
 		api.Get("/stations/quality", s.handleAllStationQuality)
 		api.Get("/stations/{id}/quality", s.handleStationQuality)
+		api.Delete("/stations", s.handleCleanupStations)
 		api.Get("/stats", s.handleStats)
 		api.Get("/config", s.handleGetConfig)
 		api.Post("/config", s.handleUpdateConfig)
@@ -523,8 +524,16 @@ func (s *Server) handleGeneratorStop(w http.ResponseWriter, r *http.Request) {
 		s.gen.Stop()
 	}
 
+	s.eng.CleanupAllStations()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"running": false,
 	})
+}
+
+func (s *Server) handleCleanupStations(w http.ResponseWriter, r *http.Request) {
+	count := s.eng.CleanupAllStations()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"cleanup": count})
 }

@@ -16,6 +16,14 @@ export const api = {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   },
+
+  async delete(path: string): Promise<unknown> {
+    const res = await fetch(API_BASE + path, {
+      method: 'DELETE',
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
 };
 
 export interface Station {
