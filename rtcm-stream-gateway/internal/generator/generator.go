@@ -47,6 +47,13 @@ func New(cfg Config) *Generator {
 	}
 }
 
+func (g *Generator) resetContext() {
+	if g.cancel != nil {
+		g.cancel()
+	}
+	g.ctx, g.cancel = context.WithCancel(context.Background())
+}
+
 func (g *Generator) Start() error {
 	g.mu.Lock()
 	if g.running {
@@ -55,6 +62,8 @@ func (g *Generator) Start() error {
 	}
 	g.running = true
 	g.mu.Unlock()
+
+	g.resetContext()
 
 	addr := g.cfg.Host
 	if addr == "" {
