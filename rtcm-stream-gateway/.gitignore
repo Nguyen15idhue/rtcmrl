@@ -1,5 +1,9 @@
 bin/
+*.exe
 *.log
 .env
+*.json
+!package.json
 rtcm-stream-gateway\frontend\node_modules
-node_modules
+node_modules/
+dist/
