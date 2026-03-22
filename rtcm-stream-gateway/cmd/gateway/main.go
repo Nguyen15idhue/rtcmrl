@@ -108,14 +108,33 @@ func main() {
 		pool.Input(engine.InFrame{SourceKey: sourceKey, SourceIP: sourceIP, Frame: frame, At: at})
 	}
 
-	if mode == "auto" {
-		mode = capture.DetectBestMode(cfg.Capture.Device, cfg.Capture.ListenPort)
+	usePcap := false
+	device := os.Getenv("DEVICE")
+	if device == "" {
+		device = cfg.Capture.Device
 	}
 
-	if mode == "pcap" || mode == "sniff" {
+	if mode == "auto" {
+		detectedMode := capture.DetectBestMode(device, cfg.Capture.ListenPort)
+		if detectedMode == "pcap" {
+			usePcap = true
+			log.Printf("[BOOT] auto-detected PCAP mode (sniffing, no port bind)")
+		} else {
+			log.Printf("[BOOT] auto-detected TCP mode")
+		}
+	} else if mode == "pcap" || mode == "sniff" {
+		detectedMode := capture.DetectBestMode(device, cfg.Capture.ListenPort)
+		if detectedMode == "pcap" {
+			usePcap = true
+		} else {
+			log.Printf("[BOOT] pcap not available, falling back to TCP mode")
+		}
+	}
+
+	if usePcap {
 		log.Printf("[BOOT] capture: PCAP mode on port %d (sniffing, no port bind)", cfg.Capture.ListenPort)
 		pcapCfg := capture.PcapConfig{
-			Interface:  cfg.Capture.Device,
+			Interface:  device,
 			ListenPort: cfg.Capture.ListenPort,
 			QueueSize:  cfg.Worker.QueueSize,
 			SnapLen:    cfg.Capture.SnapLen,
@@ -125,7 +144,6 @@ func main() {
 		pcapCap := capture.NewPcapCapture(pcapCfg, handler)
 		if err := pcapCap.Run(ctx); err != nil {
 			log.Printf("[BOOT] PCAP failed: %v, falling back to TCP mode", err)
-			mode = "tcp"
 		} else {
 			return
 		}

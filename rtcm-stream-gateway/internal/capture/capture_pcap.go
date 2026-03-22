@@ -36,6 +36,9 @@ func DetectBestMode(iface string, port int) string {
 		iface = "any"
 	}
 
+	var handle *pcap.Handle
+	var err error
+
 	if iface == "any" {
 		devs, err := pcap.FindAllDevs()
 		if err != nil {
@@ -48,25 +51,21 @@ func DetectBestMode(iface string, port int) string {
 			return "tcp"
 		}
 
-		handle, err := pcap.OpenLive(devs[0].Name, 1600, false, 100*time.Millisecond)
+		handle, err = pcap.OpenLive(devs[0].Name, 1600, false, 100*time.Millisecond)
 		if err != nil {
 			log.Printf("[AUTO] cannot open pcap device: %v", err)
 			return "tcp"
 		}
-		handle.Close()
-
-		log.Printf("[AUTO] pcap available, using sniff mode (no port bind)")
-		return "pcap"
-	}
-
-	handle, err := pcap.OpenLive(iface, 1600, false, 100*time.Millisecond)
-	if err != nil {
-		log.Printf("[AUTO] cannot open pcap on %s: %v", iface, err)
-		return "tcp"
+	} else {
+		handle, err = pcap.OpenLive(iface, 1600, false, 100*time.Millisecond)
+		if err != nil {
+			log.Printf("[AUTO] cannot open pcap on %s: %v", iface, err)
+			return "tcp"
+		}
 	}
 	handle.Close()
 
-	log.Printf("[AUTO] pcap available on %s, using sniff mode", iface)
+	log.Printf("[AUTO] pcap available, using sniff mode (no port bind)")
 	return "pcap"
 }
 
