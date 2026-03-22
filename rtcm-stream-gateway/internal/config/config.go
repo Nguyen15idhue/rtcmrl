@@ -16,6 +16,7 @@ type AppConfig struct {
 	Web     WebConfig     `json:"web"`
 	Worker  WorkerConfig  `json:"worker"`
 	Runtime RuntimeConfig `json:"runtime"`
+	Mode    string        `json:"mode"`
 }
 
 type CaptureConfig struct {
@@ -173,4 +174,20 @@ func (m *Manager) Save() error {
 	}
 
 	return os.WriteFile(m.filePath, data, 0644)
+}
+
+func (m *Manager) Load() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.filePath == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(m.filePath)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(data, m.cfg)
 }

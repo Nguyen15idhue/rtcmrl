@@ -202,7 +202,6 @@ func (e *Engine) onFrame(f InFrame) {
 			e.mu.Lock()
 			st.FramesDropped++
 			e.mu.Unlock()
-			return
 		}
 	}
 

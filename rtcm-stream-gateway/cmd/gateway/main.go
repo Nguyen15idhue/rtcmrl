@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,10 +19,18 @@ import (
 func main() {
 	cfgManager := config.New()
 
-	// Set config file path
-	if fp := os.Getenv("CONFIG_FILE"); fp != "" {
-		cfgManager.SetFilePath(fp)
-		log.Printf("[BOOT] config file: %s", fp)
+	configFile := os.Getenv("CONFIG_FILE")
+	if configFile == "" {
+		if exePath, err := os.Executable(); err == nil {
+			configFile = filepath.Dir(exePath) + "/config.json"
+		}
+	}
+
+	if configFile != "" {
+		cfgManager.SetFilePath(configFile)
+		if err := cfgManager.Load(); err != nil {
+			log.Printf("[BOOT] loaded config from: %s", configFile)
+		}
 	}
 
 	cfg := cfgManager.Get()
@@ -29,6 +38,9 @@ func main() {
 	mode := os.Getenv("CAPTURE_MODE")
 	if mode == "" {
 		mode = os.Getenv("MODE")
+	}
+	if mode == "" {
+		mode = cfg.Mode
 	}
 
 	testMode := cfg.Caster.Host == "test" || os.Getenv("TEST_MODE") == "1"
